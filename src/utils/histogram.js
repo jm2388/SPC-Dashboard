@@ -5,8 +5,22 @@
  * @returns {{ variable: number, count: number }[]}
  */
 export function buildHistogram(data, binCount = 20) {
+  if (!data.length) {
+    return [];
+  }
+
   const min = Math.min(...data);
   const max = Math.max(...data);
+
+  if (min === max) {
+    return [
+      {
+        variable: min,
+        count: data.length,
+      },
+    ];
+  }
+
   const binWidth = (max - min) / binCount;
 
   const bins = Array.from({ length: binCount }, (_, i) => ({

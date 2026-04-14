@@ -1,14 +1,14 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Layout,
   Menu,
   Breadcrumb,
   Card,
+  Button,
   Row,
   Col,
   Statistic,
   Table,
-  Tag,
   Select,
   theme,
   Collapse,
@@ -22,28 +22,35 @@ import {
 } from "antd";
 import dayjs from "dayjs";
 import { DownOutlined } from "@ant-design/icons";
-import { Line, Histogram } from "@ant-design/plots";
+import { Line } from "@ant-design/plots";
+import "./Dashboard.css";
 import lamLogo from "../assets/Lam-Research-Logo.png";
 import { buildHistogram } from "../utils/histogram";
 import { buildNormalCurve, mergeData } from "../utils/normalCurve";
 import { DistributionChart } from "../components/DistributionChart";
+import { DistributionHistogram } from "../components/DistributionHistogram";
+import { parseCSV, toNumber } from "../utils/csv";
+import biasProbeCsv from "../../backend/temp_data/PM_GX_ADVCI_Bias2_Probe_2026.csv?raw";
+import probeCsv from "../../backend/temp_data/PM_GX_ADVCI_Probe_2026.csv?raw";
 
 const { Header, Content, Sider } = Layout;
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
 
-// ---------------- TOP MENU ----------------
 const items1 = ["Dashboard", "SPC", "Settings"].map((label, index) => ({
   key: String(index + 1),
   label,
 }));
 
-// ---------------- FILTER DATA ----------------
 const geminiOptions = [
   { value: "BIAS_DEV", label: "BIAS_DEV", category: "Gemini" },
   { value: "BiasElectrode_ATAC", label: "BiasElectrode", category: "ATAC" },
   { value: "BiasElectrode_Gemini", label: "BiasElectrode", category: "Gemini" },
-  { value: "BiasElectrode_NXP", label: "BiasElectrode_NXP", category: "Gemini" },
+  {
+    value: "BiasElectrode_NXP",
+    label: "BiasElectrode_NXP",
+    category: "Gemini",
+  },
   {
     value: "BiasElectrodeSyndionGSeries",
     label: "BiasElectrodeSyndionGSeries",
@@ -58,50 +65,130 @@ const vciProbeOptions = [
   { label: "VCIProbeTest_TEMP", value: "VCIProbeTest_TEMP" },
 ];
 
-const versionOptions = ["1.1", "1.2", "1.3"];
-
-// ---------------- PROPERTY OPTIONS ----------------
-const propertyOptions = [
-  { label: "CAPACITANCE", value: "CAPACITANCE" },
-  { label: "FWD_1", value: "FWD_1" },
-  { label: "FWD_10", value: "FWD_10" },
+const overallResultOptions = [
+  { label: "All", value: "ALL" },
+  { label: "PASS", value: "PASSED" },
+  { label: "FAIL", value: "FAILED" },
 ];
 
-// ---------------- MOCK DATA ----------------
-const generateData = () => {
-  const data = [];
-  for (let i = 0; i < 50; i++) {
-    data.push({
-      time: `T${i}`,
-      CAPACITANCE: 319.85 + Math.random() * 20 - 10,
-      FWD_1: 5.0,
-      FWD_10: 50.0,
-      UCL: 348.33,
-      LCL: 291.36,
-    });
+const preferredMetrics = ["CAPACITANCE", "FWD_1", "FWD_10"];
+
+function parseStartTime(rawTime) {
+  const parsed = dayjs(rawTime);
+  return parsed.isValid() ? parsed : null;
+}
+
+function formatTimestamp(rawTime, index) {
+  if (!rawTime) {
+    return `Sample ${index + 1}`;
   }
-  return data;
-};
 
-const data = generateData();
-const latest = data[data.length - 1];
-
-// ---------------- TREND DATA (longer time range) ----------------
-const generateTrendData = () => {
-  const trendData = [];
-  for (let i = 0; i < 200; i++) {
-    trendData.push({
-      time: `W${i + 1}`,
-      CAPACITANCE: 319.85 + Math.random() * 30 - 15,
-      FWD_1: 5.0 + (Math.random() > 0.95 ? Math.random() * 0.5 : 0),
-      FWD_10: 50.0 + (Math.random() > 0.95 ? Math.random() * 2 : 0),
-    });
+  const parsed = parseStartTime(rawTime);
+  if (parsed) {
+    return parsed.format("YYYY-MM-DD HH:mm");
   }
-  return trendData;
-};
-const trendData = generateTrendData();
 
-// ---------------- CUSTOM FILTER SIDER ----------------
+  return `Sample ${index + 1}`;
+}
+
+function formatXAxisLabel(value) {
+  return value % 25 === 1 ? `#${value}` : "";
+}
+
+function getMetricList(rows) {
+  const allKeys = new Set();
+
+  rows.forEach((row) => {
+    Object.entries(row).forEach(([key, value]) => {
+      if (toNumber(value) !== null) {
+        allKeys.add(key);
+      }
+    });
+  });
+
+  const preferred = preferredMetrics.filter((metric) => allKeys.has(metric));
+  const extraMetrics = [...allKeys].filter(
+    (metric) => !preferred.includes(metric),
+  );
+
+  return [...preferred, ...extraMetrics];
+}
+
+function normalizeDataset(key, label, csvText) {
+  const rows = parseCSV(csvText);
+  const metrics = getMetricList(rows);
+
+  const records = rows
+    .map((row, index) => {
+      const numericValues = metrics.reduce((accumulator, metric) => {
+        const parsedValue = toNumber(row[metric]);
+        if (parsedValue !== null) {
+          accumulator[metric] = parsedValue;
+        }
+        return accumulator;
+      }, {});
+
+      return {
+        key: `${key}-${index}`,
+        time: formatTimestamp(row.START_TIME, index),
+        rawTime: row.START_TIME || "",
+        startTimeValue: parseStartTime(row.START_TIME)?.valueOf() ?? null,
+        result: row.OVER_ALL_RESULT || "UNKNOWN",
+        version: row.VERSION || "",
+        serialNumber: row.SERIAL_NUMBER || "",
+        ...numericValues,
+      };
+    })
+    .filter((record) =>
+      metrics.some((metric) => Number.isFinite(record[metric])),
+    );
+
+  return {
+    key,
+    label,
+    metrics,
+    records,
+  };
+}
+
+function calculateMetricStats(records, metric) {
+  const values = records
+    .map((record) => record[metric])
+    .filter((value) => Number.isFinite(value));
+
+  if (values.length === 0) {
+    return null;
+  }
+
+  const count = values.length;
+  const mean = values.reduce((sum, value) => sum + value, 0) / count;
+  const variance =
+    values.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0) / count;
+  const stdDev = Math.sqrt(variance);
+  const lcl = mean - 3 * stdDev;
+  const ucl = mean + 3 * stdDev;
+  const oocPoints = values.filter((value) => value < lcl || value > ucl).length;
+
+  return {
+    count,
+    mean,
+    stdDev,
+    lcl,
+    ucl,
+    oocPoints,
+    oocPercent: count === 0 ? 0 : (oocPoints / count) * 100,
+  };
+}
+
+const csvDatasets = [
+  normalizeDataset(
+    "bias2Probe",
+    "PM_GX_ADVCI_Bias2_Probe_2026.csv",
+    biasProbeCsv,
+  ),
+  normalizeDataset("probe", "PM_GX_ADVCI_Probe_2026.csv", probeCsv),
+];
+
 function FilterSidebar({
   geminiSearch,
   setGeminiSearch,
@@ -109,6 +196,7 @@ function FilterSidebar({
   setSelectedGemini,
   selectedProbe,
   setSelectedProbe,
+  versionOptions,
   selectedVersions,
   setSelectedVersions,
   dateRange,
@@ -121,7 +209,7 @@ function FilterSidebar({
     return geminiOptions.filter(
       (item) =>
         item.label.toLowerCase().includes(keyword) ||
-        item.category.toLowerCase().includes(keyword)
+        item.category.toLowerCase().includes(keyword),
     );
   }, [geminiSearch]);
 
@@ -159,7 +247,10 @@ function FilterSidebar({
                 <div style={{ fontWeight: 600 }}>
                   Gemini:{" "}
                   <span style={{ fontWeight: 500 }}>
-                    {geminiOptions.find((x) => x.value === selectedGemini)?.label}
+                    {
+                      geminiOptions.find((x) => x.value === selectedGemini)
+                        ?.label
+                    }
                   </span>
                 </div>
               ),
@@ -197,7 +288,9 @@ function FilterSidebar({
                           >
                             <Radio value={item.value} />
                             <div style={{ lineHeight: 1.2 }}>
-                              <div style={{ fontWeight: 500 }}>{item.label}</div>
+                              <div style={{ fontWeight: 500 }}>
+                                {item.label}
+                              </div>
                               <Text type="secondary" style={{ fontSize: 12 }}>
                                 {item.category}
                               </Text>
@@ -254,7 +347,8 @@ function FilterSidebar({
                       value={dateRange}
                       onChange={setDateRange}
                       style={{ width: "100%" }}
-                      format="MMM DD, YYYY"
+                      format="YYYY-MM-DD HH:mm"
+                      showTime={{ format: "HH:mm" }}
                     />
                   </div>
                 </div>
@@ -279,15 +373,17 @@ function FilterSidebar({
             </div>
             <div>
               <Text type="secondary">Version:</Text>{" "}
-              {selectedVersions.join(", ")}
+              {selectedVersions.length > 0
+                ? selectedVersions.join(", ")
+                : "All"}
             </div>
             <div>
               <Text type="secondary">From:</Text>{" "}
-              {dateRange?.[0]?.format("MMM DD, YYYY")}
+              {dateRange?.[0]?.format("YYYY-MM-DD HH:mm")}
             </div>
             <div>
               <Text type="secondary">To:</Text>{" "}
-              {dateRange?.[1]?.format("MMM DD, YYYY")}
+              {dateRange?.[1]?.format("YYYY-MM-DD HH:mm")}
             </div>
           </div>
         </div>
@@ -296,100 +392,296 @@ function FilterSidebar({
   );
 }
 
-// ---------------- DASHBOARD ----------------
 const Dashboard = () => {
+  const [selectedDatasetKey, setSelectedDatasetKey] = useState(
+    "probe",
+  );
   const [selectedMetric, setSelectedMetric] = useState("CAPACITANCE");
-
+  const [selectedOverallResult, setSelectedOverallResult] = useState("ALL");
   const [geminiSearch, setGeminiSearch] = useState("bias");
   const [selectedGemini, setSelectedGemini] = useState("BiasElectrode_Gemini");
   const [selectedProbe, setSelectedProbe] = useState("VCIProbeTest_BIAS");
-  const [selectedVersions, setSelectedVersions] = useState(["1.1", "1.2", "1.3"]);
-  const [dateRange, setDateRange] = useState([
-    dayjs("2024-01-01"),
-    dayjs("2026-03-24"),
-  ]);
+  const [selectedVersions, setSelectedVersions] = useState([]);
+  const [dateRange, setDateRange] = useState(null);
 
   const {
     token: { colorBgContainer, borderRadiusLG },
   } = theme.useToken();
 
-  const rawValues = useMemo(
-    () => data.map((d) => d[selectedMetric]),
-    [selectedMetric]
+  const selectedDataset =
+    csvDatasets.find((dataset) => dataset.key === selectedDatasetKey) ??
+    csvDatasets[0];
+
+  useEffect(() => {
+    if (selectedDataset && !selectedDataset.metrics.includes(selectedMetric)) {
+      setSelectedMetric(selectedDataset.metrics[0] ?? "");
+    }
+  }, [selectedDataset, selectedMetric]);
+
+  const metricOptions = useMemo(
+    () =>
+      (selectedDataset?.metrics ?? []).map((metric) => ({
+        label: metric,
+        value: metric,
+      })),
+    [selectedDataset],
   );
 
-  const distributionData = useMemo(() => {
-    const mean = rawValues.reduce((a, b) => a + b, 0) / rawValues.length;
-    const std = Math.sqrt(
-      rawValues.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) /
-        rawValues.length
+  const versionOptions = useMemo(() => {
+    const versions = new Set(
+      (selectedDataset?.records ?? [])
+        .map((record) => record.version)
+        .filter(Boolean),
     );
-    if (std === 0) return [];
-    const BIN_COUNT = 20;
-    const bins = buildHistogram(rawValues, BIN_COUNT);
+
+    return [...versions].sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true }),
+    );
+  }, [selectedDataset]);
+
+  const activeMetric = metricOptions.some(
+    (option) => option.value === selectedMetric,
+  )
+    ? selectedMetric
+    : metricOptions[0]?.value;
+
+  const datasetStartTimeRange = useMemo(() => {
+    const values = (selectedDataset?.records ?? [])
+      .map((record) => record.startTimeValue)
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+
+    if (values.length === 0) {
+      return null;
+    }
+
+    return [dayjs(values[0]), dayjs(values[values.length - 1])];
+  }, [selectedDataset]);
+
+  useEffect(() => {
+    setDateRange(datasetStartTimeRange);
+  }, [datasetStartTimeRange, selectedDatasetKey]);
+
+  const filteredRecords = useMemo(() => {
+    if (!selectedDataset) {
+      return [];
+    }
+
+    return selectedDataset.records.filter((record) => {
+      const versionMatches =
+        selectedVersions.length === 0 ||
+        selectedVersions.includes(record.version);
+      const resultMatches =
+        selectedOverallResult === "ALL" ||
+        record.result === selectedOverallResult;
+
+      const hasValidDate = Number.isFinite(record.startTimeValue);
+      const withinDateRange =
+        !hasValidDate ||
+        !dateRange?.[0] ||
+        !dateRange?.[1] ||
+        (record.startTimeValue >= dateRange[0].valueOf() &&
+          record.startTimeValue <= dateRange[1].valueOf());
+
+      return versionMatches && resultMatches && withinDateRange;
+    });
+  }, [dateRange, selectedDataset, selectedOverallResult, selectedVersions]);
+
+  const lastValidTimestamp = useMemo(() => {
+    const latestStartTime = filteredRecords.reduce((latestValue, record) => {
+      if (!Number.isFinite(record.startTimeValue)) {
+        return latestValue;
+      }
+
+      return Math.max(latestValue, record.startTimeValue);
+    }, Number.NEGATIVE_INFINITY);
+
+    if (Number.isFinite(latestStartTime)) {
+      return dayjs(latestStartTime).format("YYYY-MM-DD HH:mm");
+    }
+
+    return "No valid timestamp";
+  }, [filteredRecords]);
+
+  const summaryTableData = useMemo(
+    () =>
+      (selectedDataset?.metrics ?? [])
+        .map((metric, index) => {
+          const stats = calculateMetricStats(filteredRecords, metric);
+          if (!stats) {
+            return null;
+          }
+
+          return {
+            key: `${metric}-${index}`,
+            propertyName: metric,
+            count: stats.count,
+            stdDev: stats.stdDev,
+            lcl: stats.lcl,
+            mean: stats.mean,
+            ucl: stats.ucl,
+            oocPoints: stats.oocPoints,
+            oocPercent: stats.oocPercent,
+          };
+        })
+        .filter(Boolean),
+    [filteredRecords, selectedDataset],
+  );
+
+  const selectedMetricStats = useMemo(
+    () => summaryTableData.find((row) => row.propertyName === activeMetric),
+    [activeMetric, summaryTableData],
+  );
+
+  const chartData = useMemo(() => {
+    if (!activeMetric || !selectedMetricStats) {
+      return [];
+    }
+
+    return filteredRecords
+      .filter((record) => Number.isFinite(record[activeMetric]))
+      .map((record, index) => ({
+        ...record,
+        sample: index + 1,
+        metricValue: record[activeMetric],
+        UCL: selectedMetricStats.ucl,
+        LCL: selectedMetricStats.lcl,
+        status:
+          record[activeMetric] > selectedMetricStats.ucl ||
+          record[activeMetric] < selectedMetricStats.lcl
+            ? "alarm"
+            : "normal",
+      }));
+  }, [activeMetric, filteredRecords, selectedMetricStats]);
+
+  const latest = chartData[chartData.length - 1];
+  const rawValues = chartData.map((record) => record.metricValue);
+
+  const distributionData = useMemo(() => {
+    if (rawValues.length === 0) {
+      return [];
+    }
+
+    const mean =
+      rawValues.reduce((sum, value) => sum + value, 0) / rawValues.length;
+    const std = Math.sqrt(
+      rawValues.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0) /
+        rawValues.length,
+    );
+
+    if (std === 0) {
+      return [];
+    }
+
+    const binCount = 20;
+    const bins = buildHistogram(rawValues, binCount);
     const binWidth =
-      (Math.max(...rawValues) - Math.min(...rawValues)) / BIN_COUNT;
+      (Math.max(...rawValues) - Math.min(...rawValues)) / binCount;
     const curve = buildNormalCurve(
       mean,
       std,
       rawValues.length,
       binWidth,
       Math.min(...rawValues),
-      Math.max(...rawValues)
+      Math.max(...rawValues),
     );
+
     return mergeData(bins, curve);
   }, [rawValues]);
 
+  const histogramBins = useMemo(() => {
+    if (rawValues.length === 0) {
+      return [];
+    }
+
+    const binCount = Math.min(
+      20,
+      Math.max(8, Math.ceil(Math.sqrt(rawValues.length))),
+    );
+    return buildHistogram(rawValues, binCount);
+  }, [rawValues]);
+
+  const controlChartWidth = Math.max(1100, chartData.length * 14);
+
   const trendConfig = {
-    data: trendData.map((d) => ({
-      time: d.time,
-      value: d[selectedMetric],
+    data: chartData.map((record) => ({
+      sample: record.sample,
+      value: record.metricValue,
+      time: record.time,
     })),
-    xField: "time",
+    xField: "sample",
     yField: "value",
     smooth: true,
     height: 300,
     autoFit: true,
     axis: {
-      x: { label: { autoHide: true, autoRotate: false } },
+      x: {
+        title: "Sample",
+        label: {
+          autoHide: false,
+          autoRotate: false,
+          formatter: formatXAxisLabel,
+        },
+      },
     },
-    annotations: [
-      {
-        type: "lineY",
-        yField: latest.UCL,
-        style: { stroke: "red", lineDash: [4, 4], lineWidth: 1 },
-      },
-      {
-        type: "lineY",
-        yField: latest.LCL,
-        style: { stroke: "red", lineDash: [4, 4], lineWidth: 1 },
-      },
-      {
-        type: "lineY",
-        yField: (latest.UCL + latest.LCL) / 2,
-        style: { stroke: "green", lineDash: [2, 2], lineWidth: 1 },
-      },
-    ],
+    tooltip: {
+      items: [
+        (datum) => ({
+          name: "Value",
+          value: datum.value,
+        }),
+        (datum) => ({
+          name: "Time",
+          value: datum.time,
+        }),
+      ],
+    },
+    annotations: latest
+      ? [
+          {
+            type: "lineY",
+            yField: latest.UCL,
+            style: { stroke: "red", lineDash: [4, 4], lineWidth: 1 },
+          },
+          {
+            type: "lineY",
+            yField: latest.LCL,
+            style: { stroke: "red", lineDash: [4, 4], lineWidth: 1 },
+          },
+          {
+            type: "lineY",
+            yField: selectedMetricStats?.mean,
+            style: { stroke: "green", lineDash: [2, 2], lineWidth: 1 },
+          },
+        ]
+      : [],
   };
 
   const controlConfig = {
-    data: data.flatMap((d) => [
-      {
-        time: d.time,
-        value: d[selectedMetric],
-        type: "Actual",
-        status:
-          d[selectedMetric] > d.UCL || d[selectedMetric] < d.LCL
-            ? "alarm"
-            : "normal",
-      },
-      { time: d.time, value: d.UCL, type: "UCL" },
-      { time: d.time, value: d.LCL, type: "LCL" },
-    ]),
-    xField: "time",
+    data: chartData.map((record) => ({
+      sample: record.sample,
+      serialNumber: record.serialNumber,
+      value: record.metricValue,
+      time: record.time,
+      status: record.status,
+    })),
+    xField: "sample",
     yField: "value",
-    seriesField: "type",
     height: 400,
+    width: controlChartWidth,
+    autoFit: false,
+    axis: {
+      x: {
+        title: "Sample",
+        label: {
+          autoHide: false,
+          autoRotate: false,
+          formatter: formatXAxisLabel,
+        },
+      },
+    },
+    colorField: "status",
+    color: ({ status }) => (status === "alarm" ? "#ff4d4f" : "#1677ff"),
     point: {
       size: 4,
       shape: "circle",
@@ -400,99 +692,221 @@ const Dashboard = () => {
         return {};
       },
     },
+    tooltip: {
+      items: [
+        (datum) => ({
+          name: "Serial Number",
+          value: datum.serialNumber,
+        }),
+        (datum) => ({
+          name: activeMetric,
+          value: datum.value,
+        }),
+        (datum) => ({
+          name: "Time",
+          value: datum.time,
+        }),
+        () => ({
+          name: "UCL",
+          value: Number(selectedMetricStats?.ucl ?? 0).toFixed(2),
+        }),
+        () => ({
+          name: "LCL",
+          value: Number(selectedMetricStats?.lcl ?? 0).toFixed(2),
+        }),
+      ],
+    },
+    annotations: latest
+      ? [
+          {
+            type: "lineY",
+            yField: latest.UCL,
+            style: { stroke: "#ff4d4f", lineDash: [4, 4], lineWidth: 1.5 },
+            text: {
+              content: "UCL",
+              position: "left",
+              style: { fill: "#ff4d4f" },
+            },
+          },
+          {
+            type: "lineY",
+            yField: latest.LCL,
+            style: { stroke: "#ff4d4f", lineDash: [4, 4], lineWidth: 1.5 },
+            text: {
+              content: "LCL",
+              position: "left",
+              style: { fill: "#ff4d4f" },
+            },
+          },
+          {
+            type: "lineY",
+            yField: selectedMetricStats?.mean,
+            style: { stroke: "#52c41a", lineDash: [2, 2], lineWidth: 1.5 },
+            text: {
+              content: "CL",
+              position: "left",
+              style: { fill: "#52c41a" },
+            },
+          },
+        ]
+      : [],
   };
 
-  const tableData = [
-    {
-      key: 1,
-      propertyName: "CAPACITANCE",
-      count: 654,
-      stdDev: 9.49,
-      lcl: 291.36,
-      mean: 319.85,
-      ucl: 348.33,
-      oocPoints: 119,
-      oocPercent: 18,
-    },
-    {
-      key: 2,
-      propertyName: "FWD_1",
-      count: 654,
-      stdDev: 0,
-      lcl: 5.0,
-      mean: 5.0,
-      ucl: 5.0,
-      oocPoints: 0,
-      oocPercent: 0,
-    },
-    {
-      key: 3,
-      propertyName: "FWD_10",
-      count: 654,
-      stdDev: 0,
-      lcl: 50.0,
-      mean: 50.0,
-      ucl: 50.0,
-      oocPoints: 0,
-      oocPercent: 0,
-    },
-  ];
-
-  const columns = [
+  const summaryColumns = [
     { title: "Property Name", dataIndex: "propertyName" },
     { title: "Count", dataIndex: "count" },
-    { title: "Standard Deviation", dataIndex: "stdDev" },
-    { title: "LCL (-3 sigma)", dataIndex: "lcl" },
-    { title: "CL (Mean)", dataIndex: "mean" },
-    { title: "UCL (+3 sigma)", dataIndex: "ucl" },
+    {
+      title: "Standard Deviation",
+      dataIndex: "stdDev",
+      render: (value) => Number(value).toFixed(2),
+    },
+    {
+      title: "LCL (-3 sigma)",
+      dataIndex: "lcl",
+      render: (value) => Number(value).toFixed(2),
+    },
+    {
+      title: "CL (Mean)",
+      dataIndex: "mean",
+      render: (value) => Number(value).toFixed(2),
+    },
+    {
+      title: "UCL (+3 sigma)",
+      dataIndex: "ucl",
+      render: (value) => Number(value).toFixed(2),
+    },
     { title: "OOC Points", dataIndex: "oocPoints" },
     {
       title: "OOC %",
       dataIndex: "oocPercent",
-      render: (val) => `${val}%`,
+      render: (value) => Number(value).toFixed(2),
     },
   ];
 
-  const outOfControlCount = tableData.filter(
-    (d) => d[selectedMetric] > d.UCL || d[selectedMetric] < d.LCL
-  ).length;
-
-  const lastAlarm = tableData.find(
-    (d) => d[selectedMetric] > d.UCL || d[selectedMetric] < d.LCL
+  const alarmLogData = useMemo(
+    () =>
+      chartData.map((record) => ({
+        key: record.key,
+        sample: record.sample,
+        time: record.time,
+        serialNumber: record.serialNumber || "-",
+        version: record.version || "-",
+        result: record.result || "UNKNOWN",
+        metricValue: Number(record.metricValue.toFixed(2)),
+        lcl: Number(record.LCL.toFixed(2)),
+        mean: Number((selectedMetricStats?.mean ?? 0).toFixed(2)),
+        ucl: Number(record.UCL.toFixed(2)),
+        spcStatus: record.status === "alarm" ? "Out of Control" : "In Control",
+      })),
+    [chartData, selectedMetricStats],
   );
 
+  const outOfControlAlarmLogData = useMemo(
+    () => alarmLogData.filter((record) => record.spcStatus === "Out of Control"),
+    [alarmLogData],
+  );
+
+  const alarmLogColumns = [
+    { title: "Sample", dataIndex: "sample", width: 80, fixed: "left" },
+    { title: "Time", dataIndex: "time", width: 170 },
+    { title: "Serial Number", dataIndex: "serialNumber", width: 160 },
+    { title: "Version", dataIndex: "version", width: 90 },
+    { title: "CSV Result", dataIndex: "result", width: 110 },
+    {
+      title: activeMetric,
+      dataIndex: "metricValue",
+      width: 120,
+    },
+    { title: "LCL", dataIndex: "lcl", width: 100 },
+    { title: "CL", dataIndex: "mean", width: 100 },
+    { title: "UCL", dataIndex: "ucl", width: 100 },
+    { title: "SPC Status", dataIndex: "spcStatus", width: 130 },
+  ];
+
+  const outOfControlCount = selectedMetricStats?.oocPoints ?? 0;
+  const lastAlarmTimestamp = useMemo(() => {
+    const latestAlarmTime = chartData.reduce((latestValue, record) => {
+      if (
+        record.status !== "alarm" ||
+        !Number.isFinite(record.startTimeValue)
+      ) {
+        return latestValue;
+      }
+
+      return Math.max(latestValue, record.startTimeValue);
+    }, Number.NEGATIVE_INFINITY);
+
+    if (Number.isFinite(latestAlarmTime)) {
+      return dayjs(latestAlarmTime).format("YYYY-MM-DD HH:mm");
+    }
+
+    return "No valid alarm timestamp";
+  }, [chartData]);
   const selectedGeminiRecord = geminiOptions.find(
-    (item) => item.value === selectedGemini
+    (item) => item.value === selectedGemini,
   );
 
-  const histogramData = data.map((d) => ({
-    value: d[selectedMetric],
-  }));
+  const exportRows = useMemo(
+    () =>
+      chartData.map((record) => ({
+        Sample: record.sample,
+        Time: record.time,
+        Serial_Number: record.serialNumber || "",
+        Version: record.version || "",
+        Overall_Result: record.result || "",
+        Metric: activeMetric,
+        Metric_Value: Number(record.metricValue.toFixed(2)),
+        Mean: Number((selectedMetricStats?.mean ?? 0).toFixed(2)),
+        LCL: Number(record.LCL.toFixed(2)),
+        UCL: Number(record.UCL.toFixed(2)),
+        SPC_Status: record.status === "alarm" ? "Out of Control" : "In Control",
+      })),
+    [activeMetric, chartData, selectedMetricStats],
+  );
 
-  const histogramConfig = {
-    data: histogramData,
-    binField: "value",
-    binNumber: 30,
-    height: 400,
-    color: "#73c0b0",
-    columnStyle: {
-      stroke: "#2f8f83",
-      lineWidth: 0.5,
-      fillOpacity: 0.7,
-    },
-    coordinate: { transform: [{ type: "transpose" }] },
-    axis: {
-      y: {
-        min: latest.LCL - 10,
-        max: latest.UCL + 10,
-      },
-    },
-  };
+  function escapeCsvCell(value) {
+    const text = String(value ?? "");
+    if (/[",\n]/.test(text)) {
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+    return text;
+  }
+
+  function handleExportExcel() {
+    if (exportRows.length === 0) {
+      return;
+    }
+
+    const headers = Object.keys(exportRows[0]);
+    const csvLines = [
+      headers.join(","),
+      ...exportRows.map((row) =>
+        headers.map((header) => escapeCsvCell(row[header])).join(","),
+      ),
+    ];
+
+    const csvContent = `\uFEFF${csvLines.join("\r\n")}`;
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const fileStamp = dayjs().format("YYYYMMDD_HHmm");
+
+    link.href = url;
+    link.download = `${selectedDataset?.key || "dashboard"}_${activeMetric}_${selectedOverallResult}_${fileStamp}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <Layout style={{ height: "100vh", overflow: "hidden" }}>
       <Header style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
-        <img src={lamLogo} alt="LAM Research" style={{ height: 32, marginRight: 20 }} />
+        <img
+          src={lamLogo}
+          alt="LAM Research"
+          style={{ height: 32, marginRight: 20 }}
+        />
         <Menu
           theme="dark"
           mode="horizontal"
@@ -510,6 +924,7 @@ const Dashboard = () => {
           setSelectedGemini={setSelectedGemini}
           selectedProbe={selectedProbe}
           setSelectedProbe={setSelectedProbe}
+          versionOptions={versionOptions}
           selectedVersions={selectedVersions}
           setSelectedVersions={setSelectedVersions}
           dateRange={dateRange}
@@ -547,15 +962,9 @@ const Dashboard = () => {
               <Col flex="auto">
                 <Card size="small">
                   <Statistic
-                    title="Tool Status"
-                    value="RUN"
-                    valueStyle={{ color: "green" }}
+                    title="Gemini"
+                    value={selectedGeminiRecord?.label}
                   />
-                </Card>
-              </Col>
-              <Col flex="auto">
-                <Card size="small">
-                  <Statistic title="Gemini" value={selectedGeminiRecord?.label} />
                 </Card>
               </Col>
               <Col flex="auto">
@@ -565,7 +974,10 @@ const Dashboard = () => {
               </Col>
               <Col flex="auto">
                 <Card size="small">
-                  <Statistic title="Last Update" value={latest.time} />
+                  <Statistic
+                    title="Last Update"
+                    value={lastValidTimestamp}
+                  />
                 </Card>
               </Col>
               <Col flex="auto">
@@ -579,39 +991,102 @@ const Dashboard = () => {
               </Col>
               <Col flex="auto">
                 <Card size="small">
-                  <Statistic title="Cpk" value={1.67} precision={2} />
+                  <Statistic
+                    title="Mean"
+                    value={selectedMetricStats?.mean ?? 0}
+                    precision={2}
+                  />
                 </Card>
               </Col>
               <Col flex="auto">
                 <Card size="small">
                   <Statistic
                     title="Last Alarm"
-                    value={lastAlarm ? lastAlarm.time : "None"}
+                    value={lastAlarmTimestamp}
                   />
                 </Card>
               </Col>
             </Row>
 
-            <Row style={{ marginTop: 20 }}>
+            <Row gutter={12} style={{ marginTop: 20 }}>
               <Col>
                 <Select
-                  value={selectedMetric}
+                  value={selectedDataset?.key}
+                  onChange={setSelectedDatasetKey}
+                  style={{ width: 320 }}
+                  options={csvDatasets.map((dataset) => ({
+                    label: dataset.label,
+                    value: dataset.key,
+                  }))}
+                />
+              </Col>
+              <Col>
+                <Select
+                  value={activeMetric}
                   onChange={(value) => setSelectedMetric(value)}
                   style={{ width: 220 }}
-                  options={propertyOptions}
+                  options={metricOptions}
                 />
+              </Col>
+              <Col>
+                <Select
+                  value={selectedOverallResult}
+                  onChange={setSelectedOverallResult}
+                  style={{ width: 220 }}
+                  options={overallResultOptions}
+                  placeholder="Overall Result"
+                />
+              </Col>
+              <Col flex="auto">
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                  <Button
+                    onClick={handleExportExcel}
+                    disabled={exportRows.length === 0}
+                    aria-label="Export current dashboard data"
+                    title="Export current dashboard data"
+                    className="export-excel-button"
+                    style={{
+                      width: 44,
+                      height: 44,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: 0,
+                      background: "#ffffff",
+                      borderColor: "#d9d9d9",
+                    }}
+                  >
+                    <img
+                      src="/excel-icon.png"
+                      alt="Export"
+                      style={{ width: 22, height: 22, display: "block" }}
+                    />
+                  </Button>
+                </div>
               </Col>
             </Row>
 
             <Row gutter={16} style={{ marginTop: 20 }}>
               <Col span={18}>
                 <Card title="SPC Control Chart">
-                  <Line {...controlConfig} />
+                  <div style={{ overflowX: "auto", overflowY: "hidden" }}>
+                    <div style={{ width: controlChartWidth }}>
+                      <Line {...controlConfig} />
+                    </div>
+                  </div>
                 </Card>
               </Col>
               <Col span={6}>
                 <Card title="Distribution Histogram">
-                  <Histogram {...histogramConfig} />
+                  {histogramBins.length > 0 ? (
+                    <DistributionHistogram
+                      data={histogramBins}
+                      metric={activeMetric}
+                      limits={selectedMetricStats}
+                    />
+                  ) : (
+                    <p>No data</p>
+                  )}
                 </Card>
               </Col>
             </Row>
@@ -636,9 +1111,26 @@ const Dashboard = () => {
             <Row style={{ marginTop: 20 }}>
               <Col span={24}>
                 <Card title="Alarm Log">
+                  {outOfControlAlarmLogData.length > 0 ? (
+                    <Table
+                      columns={alarmLogColumns}
+                      dataSource={outOfControlAlarmLogData}
+                      pagination={{ pageSize: 10 }}
+                      scroll={{ x: 1200 }}
+                    />
+                  ) : (
+                    <p>No out-of-control data for the current selection.</p>
+                  )}
+                </Card>
+              </Col>
+            </Row>
+
+            <Row style={{ marginTop: 20 }}>
+              <Col span={24}>
+                <Card title="Metric Summary">
                   <Table
-                    columns={columns}
-                    dataSource={tableData}
+                    columns={summaryColumns}
+                    dataSource={summaryTableData}
                     pagination={{ pageSize: 8 }}
                     scroll={{ x: "max-content" }}
                   />
